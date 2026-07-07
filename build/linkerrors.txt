@@ -1,0 +1,11 @@
+================================================================================
+Linker Errors
+Generated: 2026-07-04T21:44:33.265Z
+Total Errors: 2
+================================================================================
+
+[LNK2005] (MSVC)
+main already defined in miniCompiler.obj [C:\Users\junta\OneDrive\Desktop\implementationWaferLLM\build\myapp.vcxproj]
+
+[LNK1169] (MSVC)
+one or more multiply defined symbols found [C:\Users\junta\OneDrive\Desktop\implementationWaferLLM\build\myapp.vcxproj]

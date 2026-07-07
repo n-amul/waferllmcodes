@@ -1,0 +1,175 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+/* ============================================================
+ * Stage 2: naive vs balanced pipeline for the CereSZ mapping.
+ *   - your Stage-1 engine, extracted into run_pipeline()
+ *   - your algo1() greedy load balancer (unchanged)
+ *   - a main() that runs both and compares
+ * ============================================================ */
+
+#define N_BLOCKS 100 /* blocks pushed through (steady-state measure) */
+#define QCAP (N_BLOCKS + 1)
+
+struct block {
+  int _ID;
+  int _enter_time;
+  int _finish_time;
+};
+
+typedef struct {
+  struct block *items[QCAP];
+  int head, tail;
+} Queue;
+static void q_init(Queue *q) { q->head = q->tail = 0; }
+static int q_empty(Queue *q) { return q->head == q->tail; }
+static void q_push(Queue *q, struct block *b) {
+  q->items[q->tail] = b;
+  q->tail = (q->tail + 1) % QCAP;
+}
+static struct block *q_pop(Queue *q) {
+  struct block *b = q->items[q->head];
+  q->head = (q->head + 1) % QCAP;
+  return b;
+}
+
+struct PE {
+  struct block *_block;
+  unsigned int _service_time;
+  char _busy;
+  int _finish_at;
+  Queue que;
+};
+
+/* -------- your greedy balancer, unchanged -------- */
+int *algo1(unsigned int *atomic, int size, int m) {
+  int C = 0;
+  for (int i = 0; i < size; i++)
+    C += atomic[i];
+  int goal = C / m;
+  int *res = calloc(m, sizeof(int));
+  int idx = 0;
+  for (int i = 0; i < m; i++) {
+    while (res[i] < goal && idx < size)
+      res[i] += atomic[idx++];
+  }
+  return res;
+}
+
+/* -------- your Stage-1 clock loop, now a function -------- *
+ * Runs ONE pipeline of num_stages PEs with the given service times.
+ * Returns the cycle at which the last block leaves the line.       */
+int run_pipeline(int num_stages, const unsigned int *service, int verbose) {
+  struct PE pipeline[num_stages];
+  for (int i = 0; i < num_stages; i++) {
+    pipeline[i]._block = NULL;
+    pipeline[i]._service_time = service[i];
+    pipeline[i]._busy = 0;
+    pipeline[i]._finish_at = -1;
+    q_init(&pipeline[i].que);
+  }
+  struct block *blocks = malloc(N_BLOCKS * sizeof *blocks);
+  for (int i = 0; i < N_BLOCKS; i++) {
+    blocks[i]._ID = i;
+    blocks[i]._enter_time = 0;
+    blocks[i]._finish_time = -1;
+    q_push(&pipeline[0].que, &blocks[i]);
+  }
+
+  int now = 0, completed = 0, last_finish = 0;
+  while (completed < N_BLOCKS) {
+    for (int i = 0; i < num_stages; i++) /* completions first */
+      if (pipeline[i]._busy && pipeline[i]._finish_at == now) {
+        struct block *b = pipeline[i]._block;
+        pipeline[i]._busy = 0;
+        pipeline[i]._block = NULL;
+        if (i == num_stages - 1) {
+          b->_finish_time = now;
+          last_finish = now;
+          completed++;
+        } else
+          q_push(&pipeline[i + 1].que, b);
+      }
+    for (int i = 0; i < num_stages; i++) /* then everyone grabs */
+      if (!pipeline[i]._busy && !q_empty(&pipeline[i].que)) {
+        struct block *b = q_pop(&pipeline[i].que);
+        pipeline[i]._block = b;
+        pipeline[i]._busy = 1;
+        pipeline[i]._finish_at = now + (int)pipeline[i]._service_time;
+      }
+    now++;
+  }
+  free(blocks);
+
+  if (verbose) {
+    unsigned int slowest = 0;
+    for (int i = 0; i < num_stages; i++)
+      if (service[i] > slowest)
+        slowest = service[i];
+    for (int i = 0; i < num_stages; i++) {
+      long busy = (long)N_BLOCKS * service[i];
+      printf("    stage %d: %6u cyc   util %5.1f%%\n", i, service[i],
+             100.0 * busy / last_finish);
+    }
+    printf("    -> finish=%d  throughput=%.6e blocks/cyc  (1/slowest=%.6e)\n",
+           last_finish, (double)N_BLOCKS / last_finish, 1.0 / slowest);
+  }
+  return last_finish;
+}
+
+static int has_zero(const int *a, int n) {
+  for (int i = 0; i < n; i++)
+    if (a[i] == 0)
+      return 1;
+  return 0;
+}
+
+int main(void) {
+  /* atomic sub-stages for CESM-ATM (paper Tables 2-3), original order:
+     quant(mult,add) + predict + encode(sign,max,getlen, 17x bit-shuffle) */
+  unsigned int atomic[6 + 17];
+  unsigned int head[6] = {5078, 1033, 975, 1044, 1037, 1386};
+  for (int i = 0; i < 6; i++)
+    atomic[i] = head[i];
+  for (int i = 0; i < 17; i++)
+    atomic[6 + i] = 1977;
+  int n_atomic = 6 + 17;
+
+  /* (a) NAIVE: 3 natural stages, unbalanced (paper Table 1 totals) */
+  unsigned int naive[3] = {6051, 975, 37124};
+  printf("=== (a) naive: 3 natural stages {quant, predict, encode} ===\n");
+  int fn = run_pipeline(3, naive, 1);
+
+  /* (b) BALANCED: same 3 PEs, but greedily repacked from atomic pieces */
+  int m = 3;
+  int *bal = algo1(atomic, n_atomic, m);
+  printf("\n=== (b) balanced: same %d PEs, greedy split ===\n", m);
+  printf("    service = {%d, %d, %d}\n", bal[0], bal[1], bal[2]);
+  int fb = run_pipeline(m, (unsigned int *)bal, 1);
+  printf("\n>>> balanced runs %.2fx faster with the SAME 3 PEs (%d -> %d "
+         "cycles)\n",
+         (double)fn / fb, fn, fb);
+  free(bal);
+
+  /* (bonus) more PEs -> shorter slowest stage, until the pieces run out */
+  printf("\n=== (bonus) balanced throughput vs #PEs (m) ===\n");
+  for (int mm = 1; mm <= 8; mm++) {
+    int *s = algo1(atomic, n_atomic, mm);
+    if (has_zero(s, mm)) { /* a stage got no work: pieces exhausted */
+      printf("  m=%d: infeasible (a stage gets 0 work)\n", mm);
+      free(s);
+      continue;
+    }
+    int f = run_pipeline(mm, (unsigned int *)s, 0);
+    unsigned int slowest = 0;
+    for (int i = 0; i < mm; i++)
+      if ((unsigned)s[i] > slowest)
+        slowest = (unsigned)s[i];
+    printf("  m=%d: slowest stage=%6u   throughput=%.6e\n", mm, slowest,
+           (double)N_BLOCKS / f);
+    free(s);
+  }
+  printf("  (largest indivisible piece = multiply 5078 -> useful length ~ "
+         "floor(44162/5078)=8)\n");
+  return 0;
+}
