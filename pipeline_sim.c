@@ -3,16 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Stage 1: single-pipeline simulator for the CereSZ mapping.
-
-//  Models ONE row = a pipeline of NUM_STAGES PEs (an assembly line).
-//  We do NOT compress real data. A "block" is just a token; each PE
-//  (stage) takes a fixed number of cycles to "process" it. We push
-//  many blocks through and watch the line fill up and settle.
-//
-//  The one thing to see: in steady state, one finished block comes
-//  out every (slowest-stage) cycles, and the fast stages mostly idle.
-
 #define NUM_STAGES 3
 #define N_BLOCKS 1000
 #define QCAP (N_BLOCKS + 1)
@@ -24,7 +14,7 @@ struct block {
 // A tiny FIFO (ring buffer) holding blocks waiting in front of a PE.
 typedef struct {
   struct block *items[QCAP];
-  int head, tail; /* occupied = [head, tail); empty iff head==tail */
+  int head, tail; // occupied = [head, tail); empty iff head==tail
 } Queue;
 
 static void q_init(Queue *q) { q->head = q->tail = 0; }
@@ -39,7 +29,7 @@ static struct block *q_pop(Queue *q) {
   return b;
 }
 
-/* A PE = one assembly-line station. */
+// PE = one assembly-line station.
 struct PE {
   struct block *_block;       // block being processed right now (NULL = idle)
   unsigned int _service_time; // CONFIG: cycles to process one block
@@ -48,7 +38,6 @@ struct PE {
   Queue que;      // blocks handed over from the previous stage
 };
 
-/* One Gantt entry: "stage S worked on block B from start..end". */
 struct job {
   int stage, bid, start, end;
 };
@@ -86,7 +75,7 @@ int run_pipeline(int num_stages, const unsigned int *service, int verbose) {
   // clock:
   int now = 0, completed = 0, last_finish = 0;
   while (completed < N_BLOCKS) {
-    for (int i = 0; i < num_stages; i++) /* completions first */
+    for (int i = 0; i < num_stages; i++) // completions first
       if (pipeline[i]._busy && pipeline[i]._finish_at == now) {
         struct block *b = pipeline[i]._block;
         pipeline[i]._busy = 0;
@@ -97,7 +86,7 @@ int run_pipeline(int num_stages, const unsigned int *service, int verbose) {
         } else
           q_push(&pipeline[i + 1].que, b);
       }
-    for (int i = 0; i < num_stages; i++) /* then everyone grabs */
+    for (int i = 0; i < num_stages; i++) // then everyone grabs
       if (!pipeline[i]._busy && !q_empty(&pipeline[i].que)) {
         struct block *b = q_pop(&pipeline[i].que);
         pipeline[i]._block = b;
@@ -153,7 +142,7 @@ int main(void) {
   int fb = run_pipeline(m, (unsigned int *)bal, 1);
   free(bal);
 
-  //
+  // proving L=1 is best if we can fit in localmem and fill mesh sufficently
   double C = 0;
   for (int i = 0; i < atomic_size; i++)
     C += atomic[i];
